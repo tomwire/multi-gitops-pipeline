@@ -12,20 +12,17 @@ on:
 permissions:
   contents: read
   packages: write
-  security-events: write
 
 env:
-  IMAGE_NAME: order-service-api
-  IMAGE_TAG: ${{ github.sha }}
+  AWS_REGION: "us-east-2"
+  ECR_REPOSITORY: "order-service-api"
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Build & Test — builds Docker image, scans with Trivy
-  # ECR push is conditional: requires AWS_ROLE_ARN secret (production use)
-  # Without the secret (portfolio mode): local build + scan succeeds, skips ECR
+  # Build & Test
   # ---------------------------------------------------------------------------
   build-and-test:
-    name: Build & Scan Application
+    name: Build & Test Application
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -34,68 +31,45 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ---------------------------------------------------------------------------
-      # Always run: build image and scan it locally (portfolio-friendly)
-      # ---------------------------------------------------------------------------
-      - name: Build application image (local)
-        id: build-local
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & push application image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build \
             --build-arg BUILDKIT_INLINE_CACHE=1 \
-            -t $IMAGE_NAME:$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
             -f src/Dockerfile .
 
-      - name: Run Trivy vulnerability scan
+          # Also push as 'latest' for dev convenience
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Build & scan with Trivy
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: "docker.io/library/${IMAGE_NAME}:${IMAGE_TAG}"
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
 
       - name: Upload Trivy results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
-
-      # ---------------------------------------------------------------------------
-      # ECR push — conditional on AWS_ROLE_ARN secret being set (production use)
-      # When absent, CI still passes after build + scan completes above
-      # ---------------------------------------------------------------------------
-      - name: Configure AWS credentials for ECR
-        id: aws-auth
-        if: ${{ secrets.AWS_ROLE_ARN != '' }}
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-2
-
-      - name: Login to Amazon ECR
-        if: ${{ steps.aws-auth.outcome == 'success' }}
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Tag & push to ECR
-        if: ${{ steps.aws-auth.outcome == 'success' }}
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: |
-          docker tag $IMAGE_NAME:$IMAGE_TAG $ECR_REGISTRY/$IMAGE_NAME:${IMAGE_TAG}
-          docker tag $IMAGE_NAME:$IMAGE_TAG $ECR_REGISTRY/$IMAGE_NAME:latest
-          docker push $ECR_REGISTRY/$IMAGE_NAME:${IMAGE_TAG}
-          docker push $ECR_REGISTRY/$IMAGE_NAME:latest
-
-      - name: Set output for downstream workflows
-        id: meta
-        run: |
-          if [[ "${{ steps.aws-auth.outcome }}" == "success" ]]; then
-            echo "pushed=true" >> $GITHUB_OUTPUT
-            echo "ecr_image=${{ steps.login-ecr.outputs.registry }}/${IMAGE_NAME}:${IMAGE_TAG}" >> $GITHUB_OUTPUT
-          else
-            echo "pushed=false" >> $GITHUB_OUTPUT
-            echo "ecr_image=" >> $GITHUB_OUTPUT
-          fi
 
   # ---------------------------------------------------------------------------
   # Terraform Validation (providers + environments)
@@ -144,11 +118,8 @@ jobs:
         run: |
           for env in dev staging prod; do
             echo "Building ${env} overlay..."
-            if kustomize build k8s-manifests/overlays/${env} --output /dev/null 2>/dev/null; then
-              echo "${env}: OK"
-            else
-              echo "${env}: overlay has unresolvable placeholders (expected)"
-            fi
+            kustomize build k8s-manifests/overlays/${env} --output /dev/null \
+              2>&1 || { echo "${env} overlay has expected placeholders"; }
           done
 
   # ---------------------------------------------------------------------------
@@ -160,7 +131,7 @@ jobs:
     needs: [terraform-validate]
     steps:
       - uses: actions/checkout@v4
-      - name: Run tfec
+      - name: Run tfsec
         uses: aquasecurity/tfsec-action@v1.0.3
         with:
           soft_fail: true
@@ -192,4 +163,4 @@ jobs:
     needs: [build-and-test, terraform-validate, kustomize-validate, terraform-security, secret-scanning]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
-      - run: echo "✅ All CI checks passed"
+      - run: echo "✅ All CI checks passed — image pushed to ECR"
