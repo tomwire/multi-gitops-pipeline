@@ -34,29 +34,29 @@ jobs:
       - name: Check if credentials are configured
         id: check-creds
         run: |
-          if [ "${{ secrets.AWS_ROLE_ARN }}" != "" ]; then
-            echo "AWS credentials available — proceeding with full pipeline"
-            exit 0
-          else
-            echo "⚠️  No AWS_ROLE_ARN secret configured (portfolio mode)"
+          if [[ "${{ secrets.AWS_ROLE_ARN }}" == "" ]]; then
+            echo "⚠️ No AWS_ROLE_ARN secret configured (portfolio mode)"
             echo "AWS-dependent steps will be skipped. Set AWS_ROLE_ARN in repo secrets for production use."
-            exit 0
+            echo "aws_available=false" >> $GITHUB_OUTPUT
+          else
+            echo "✅ AWS credentials available — proceeding with full pipeline"
+            echo "aws_available=true" >> $GITHUB_OUTPUT
           fi
 
       - name: Configure AWS credentials
-        if: ${{ steps.check-creds.outcome == 'success' }}
+        if: ${{ steps.check-creds.outputs.aws_available == 'true' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        if: ${{ steps.check-creds.outcome == 'success' }}
+        if: ${{ steps.check-creds.outputs.aws_available == 'true' }}
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build & push application image
-        if: ${{ steps.check-creds.outcome == 'success' }}
+        if: ${{ steps.check-creds.outputs.aws_available == 'true' }}
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
@@ -73,7 +73,7 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
       - name: Build & scan with Trivy
-        if: ${{ steps.check-creds.outcome == 'success' }}
+        if: ${{ steps.check-creds.outputs.aws_available == 'true' }}
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
