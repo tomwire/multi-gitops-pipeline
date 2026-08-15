@@ -1,0 +1,52 @@
+# =============================================================================
+# Production Overlay — Full capacity with drift detection enabled
+# Promoted from: staging branch via merge (requires manual approval + validation)
+# =============================================================================
+
+namespace: order-service-api-prod
+
+resources:
+  - ../../base
+
+commonLabels:
+  environment: prod
+  team: platform-engineering
+
+patches:
+  # Patch ConfigMap with env-specific values
+  - target:
+      kind: ConfigMap
+      name: order-service-api-config
+    patch: |
+      - op: replace
+        path: /data/environment
+        value: prod
+      - op: replace
+        path: /data/imageTag
+        value: latest
+
+  # Patch deployment — 3 replicas, production resources
+  - target:
+      kind: Deployment
+      name: order-service-api
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 250m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 256Mi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: 1000m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 512Mi
+
+images:
+  - name: PLACEHOLDER_IMAGE
+    newName: ECR_REPO/order-service-api
+    newTag: PLACEHOLDER_TAG

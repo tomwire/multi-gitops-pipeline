@@ -1,0 +1,83 @@
+# =============================================================================
+# ArgoCD — ApplicationSet to manage multi-env promotion pipeline
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Dev: auto-sync, always up-to-date with git
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: order-service-api-dev
+  namespace: argocd
+  annotations:
+    description: "Dev environment — auto-sync on every commit"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/twire/multi-gitops-pipeline.git
+    targetRevision: main
+    path: k8s-manifests/overlays/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: order-service-api-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+# ---------------------------------------------------------------------------
+# Staging: auto-sync with manual approval gate via branch merge workflow
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: order-service-api-staging
+  namespace: argocd
+  annotations:
+    description: "Staging environment — synced after dev promotion + approval"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/twire/multi-gitops-pipeline.git
+    targetRevision: main
+    path: k8s-manifests/overlays/staging
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: order-service-api-staging
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+  # Approval gate: requires manual sync or CI-promotion trigger
+  ignoreDifferences: []
+---
+# ---------------------------------------------------------------------------
+# Production: gated promotion with strict sync policy
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: order-service-api-prod
+  namespace: argocd
+  annotations:
+    description: "Production environment — manual promotion gate + drift detection"
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/twire/multi-gitops-pipeline.git
+    targetRevision: main
+    path: k8s-manifests/overlays/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: order-service-api-prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false   # Prod: no auto-heal — prevents unintended changes
+    syncOptions:
+      - CreateNamespace=true

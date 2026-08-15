@@ -1,0 +1,52 @@
+# =============================================================================
+# Staging Overlay — Production-like sizing with approval gates
+# Promoted from: dev branch via merge (requires approval)
+# =============================================================================
+
+namespace: order-service-api-staging
+
+resources:
+  - ../../base
+
+commonLabels:
+  environment: staging
+  team: platform-engineering
+
+patches:
+  # Patch ConfigMap with env-specific values
+  - target:
+      kind: ConfigMap
+      name: order-service-api-config
+    patch: |
+      - op: replace
+        path: /data/environment
+        value: staging
+      - op: replace
+        path: /data/imageTag
+        value: latest
+
+  # Patch deployment — 2 replicas, production-like resources
+  - target:
+      kind: Deployment
+      name: order-service-api
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 2
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 100m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 128Mi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: 500m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 256Mi
+
+images:
+  - name: PLACEHOLDER_IMAGE
+    newName: ECR_REPO/order-service-api
+    newTag: PLACEHOLDER_TAG

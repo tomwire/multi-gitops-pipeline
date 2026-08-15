@@ -1,0 +1,19 @@
+# =============================================================================
+# Kustomize Base — Shared manifests for all environments
+# =============================================================================
+
+namespace: order-service-api
+
+resources:
+  - deployment.yaml
+  - configmap.yaml
+  - service.yaml
+  - network-policy.yaml
+  - redis-statefulset.yaml
+  - redis-service.yaml
+
+commonLabels:
+  app: order-service-api
+
+# Image patches applied via overlays per environment
+images: []

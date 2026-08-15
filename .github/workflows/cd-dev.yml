@@ -1,0 +1,82 @@
+# =============================================================================
+# Multi-Stage GitOps Pipeline - CD Promotion to Dev (Auto-Sync)
+# =============================================================================
+name: CD — Promote to Dev (Auto-Sync)
+
+on:
+  workflow_run:
+    workflows: ["CI/CD - Multi-Stage Delivery Pipeline"]
+    types: [completed]
+    branches: [main, master]
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  AWS_REGION: "us-east-2"
+  ECR_REPOSITORY: "order-service-api"
+  BOT_NAME: gitops-pipeline-bot
+  BOT_EMAIL: bot@multi-gitops-pipeline.dev
+
+jobs:
+  auto-promote-dev:
+    name: Auto-Promote to Dev
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Get latest image digest
+        run: |
+          LATEST_DIGEST=$(aws ecr batch-get-image \
+            --repository-name $ECR_REPOSITORY \
+            --image-ids imageTag=latest \
+            --query 'images[0].imageId.imageDigest' \
+            --output text)
+          echo "Latest image digest: ${LATEST_DIGEST}"
+          echo "IMAGE_DIGEST=${LATEST_DIGEST}" >> $GITHUB_ENV
+
+      - name: Determine new tag
+        run: |
+          # Use the SHA from workflow_run event or fallback to latest git commit
+          COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"
+          echo "PROMOTE_TAG=v$(date +%Y%m%d)-${COMMIT_SHA:0:8}" >> $GITHUB_ENV
+          echo "Using tag: ${PROMOTE_TAG}"
+
+      - name: Update dev overlay image reference
+        run: |
+          OVERLAY_FILE="k8s-manifests/overlays/dev/kustomization.yaml"
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          FULL_IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${PROMOTE_TAG}"
+          
+          # Use sed with \b anchors to match only the exact placeholder strings
+          sed -i "s|newTag: [a-zA-Z0-9_-]\+|newTag: ${PROMOTE_TAG}|g" "$OVERLAY_FILE"
+          sed -i "s|newName: [a-zA-Z0-9_./-]\+|newName: ${FULL_IMAGE}|g" "$OVERLAY_FILE"
+          
+          echo "Updated dev overlay to: ${FULL_IMAGE}"
+
+      - name: Commit and push dev overlay change
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "🚀 CD: promote image ${{ env.PROMOTE_TAG }} to dev"
+          file_pattern: k8s-manifests/overlays/dev/kustomization.yaml
+          commit_user_name: ${{ env.BOT_NAME }}
+          commit_user_email: ${{ env.BOT_EMAIL }}
+          commit_author: ${{ env.BOT_NAME }} <${{ env.BOT_EMAIL }}>
+
+      - name: Notify ArgoCD (dev should auto-sync)
+        run: echo "✅ Dev overlay updated — ArgoCD will auto-sync via selfHeal"

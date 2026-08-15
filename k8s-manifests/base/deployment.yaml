@@ -1,0 +1,62 @@
+# =============================================================================
+# Base — Order Service Deployment
+# =============================================================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service-api
+spec:
+  selector:
+    matchLabels:
+      app: order-service-api
+  template:
+    metadata:
+      labels:
+        app: order-service-api
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+      containers:
+        - name: api
+          image: PLACEHOLDER_IMAGE
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: SERVICE_ENV
+              valueFrom:
+                configMapKeyRef:
+                  name: order-service-api-config
+                  key: environment
+            - name: IMAGE_TAG
+              valueFrom:
+                configMapKeyRef:
+                  name: order-service-api-config
+                  key: imageTag
+            - name: REDIS_HOST
+              value: "redis-service"
+            - name: REDIS_PORT
+              value: "6379"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

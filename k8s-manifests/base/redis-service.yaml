@@ -1,0 +1,17 @@
+# =============================================================================
+# Base — Redis Service
+# =============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+spec:
+  selector:
+    app: redis-statefulset
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP
+  type: ClusterIP

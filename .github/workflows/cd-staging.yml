@@ -1,0 +1,83 @@
+# =============================================================================
+# Multi-Stage GitOps Pipeline - Promote to Staging (Requires Approval)
+# =============================================================================
+name: CD — Promote to Staging (Approval Gate)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to promote (e.g., v20260115-abc12345)"
+        required: true
+        type: string
+      confirm_staging:
+        description: "Type 'APPROVE-STAGING' to confirm promotion"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  AWS_REGION: "us-east-2"
+  ECR_REPOSITORY: "order-service-api"
+  BOT_NAME: gitops-pipeline-bot
+  BOT_EMAIL: bot@multi-gitops-pipeline.dev
+
+jobs:
+  promote-to-staging:
+    name: Promote to Staging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Approve gate check
+        run: |
+          if [ "${{ github.event.inputs.confirm_staging }}" != "APPROVE-STAGING" ]; then
+            echo "❌ Promotion denied — staging approval not confirmed"
+            exit 1
+          fi
+          echo "✅ Staging promotion approved by ${{ github.actor }}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify image exists in ECR
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          aws ecr batch-get-image \
+            --repository-name $ECR_REPOSITORY \
+            --image-ids imageTag=${TAG} >/dev/null 2>&1 || {
+            echo "❌ Image ${TAG} not found in ECR"
+            exit 1
+          }
+          echo "✅ Image ${TAG} verified in ECR"
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Update staging overlay image reference
+        run: |
+          OVERLAY_FILE="k8s-manifests/overlays/staging/kustomization.yaml"
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          FULL_IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${{ github.event.inputs.image_tag }}"
+          
+          sed -i "s|newTag: [a-zA-Z0-9_-]\+|newTag: ${{ github.event.inputs.image_tag }}|g" "$OVERLAY_FILE"
+          sed -i "s|newName: [a-zA-Z0-9_./-]\+|newName: ${FULL_IMAGE}|g" "$OVERLAY_FILE"
+
+      - name: Commit and push staging overlay change
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "📦 CD: promote image ${{ github.event.inputs.image_tag }} to staging"
+          file_pattern: k8s-manifests/overlays/staging/kustomization.yaml
+          commit_user_name: ${{ env.BOT_NAME }}
+          commit_user_email: ${{ env.BOT_EMAIL }}
+
+      - name: Summary
+        run: |
+          echo "✅ Staging promotion complete"
+          echo "Image tag: ${{ github.event.inputs.image_tag }}"
+          echo "ArgoCD will sync staging overlay automatically on merge to main"

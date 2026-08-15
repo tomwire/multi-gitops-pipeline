@@ -1,0 +1,11 @@
+# =============================================================================
+# TruffleHog Configuration — Only flag verified secrets
+# =============================================================================
+
+[rules]
+  # Exclude non-secret patterns that cause false positives
+  exclude = [
+    "PLACEHOLDER",
+    "EXAMPLE",
+    "TODO"
+  ]

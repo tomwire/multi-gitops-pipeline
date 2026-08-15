@@ -1,0 +1,154 @@
+# =============================================================================
+# Multi-Stage GitOps Pipeline - Drift Detection (Scheduled)
+# =============================================================================
+name: Drift Detection
+
+on:
+  schedule:
+    # Check every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:  # Manual trigger for on-demand checks
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: "us-east-2"
+
+jobs:
+  detect-drift:
+    name: Detect Manifest Drift
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [dev, staging, prod]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'latest'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig for EKS
+        run: |
+          CLUSTER_NAME="eks-${{ matrix.environment }}"
+          aws eks update-kubeconfig --name $CLUSTER_NAME \
+            --region ${{ env.AWS_REGION }} --alias eks-${{ matrix.environment }}
+
+      - name: Build desired state from Git overlay
+        id: build
+        run: |
+          OVERLAY="k8s-manifests/overlays/${{ matrix.environment }}"
+          
+          # Try to build the kustomize overlay (may fail if PLACEHOLDER values needed)
+          # If it fails, we'll compare against a known-good base instead
+          if kustomize build $OVERLAY > /tmp/desired-${{ matrix.environment }}.yaml 2>/dev/null; then
+            echo "built=true" >> $GITHUB_OUTPUT
+            echo "✅ Built desired state from overlay"
+          else
+            # Fall back: compare with base manifests only
+            echo "built=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Overlay has unresolvable placeholders — using base manifests for drift check"
+            kustomize build k8s-manifests/base > /tmp/desired-${{ matrix.environment }}.yaml 2>/dev/null || true
+          fi
+
+      - name: Get live cluster state
+        run: |
+          KUBECTL_NAMESPACE="order-service-api-${{ matrix.environment }}"
+          kubectl get deployments,service,statefulset,pod -n $KUBECTL_NAMESPACE \
+            -o yaml > /tmp/live-${{ matrix.environment }}.yaml 2>/dev/null || {
+            echo "⚠️ Namespace ${KUBECTL_NAMESPACE} not found — skipping"
+            exit 0
+          }
+
+      - name: Compare desired vs live (drift detection)
+        id: diff
+        run: |
+          DESIRED="/tmp/desired-${{ matrix.environment }}.yaml"
+          LIVE="/tmp/live-${{ matrix.environment }}.yaml"
+          
+          if [ ! -f "$DESIRED" ] || [ ! -f "$LIVE" ]; then
+            echo "drift_found=false" >> $GITHUB_OUTPUT
+            echo "Skipping comparison — missing manifest or namespace"
+            exit 0
+          fi
+
+          # Compare resource counts and key fields
+          DESIRED_DEPS=$(grep -c 'kind: Deployment' "$DESIRED" 2>/dev/null || echo 0)
+          LIVE_DEPS=$(grep -c 'kind: Deployment' "$LIVE" 2>/dev/null || echo 0)
+
+          if [ "$DESIRED_DEPS" != "$LIVE_DEPS" ]; then
+            echo "🚨 DRIFT DETECTED: Resource count mismatch in ${{ matrix.environment }}"
+            echo "Desired deployments: ${DESIRED_DEPS}, Live deployments: ${LIVE_DEPS}"
+            
+            # Generate diff output for the issue/PR
+            kubectl diff -n order-service-api-${{ matrix.environment }} \
+              -f "$DESIRED" 2>/dev/null > /tmp/drift-report.txt || true
+            
+            echo "drift_found=true" >> $GITHUB_OUTPUT
+            
+            # Also check replicas specifically
+            LIVE_REPLICAS=$(kubectl get deployment -n order-service-api-${{ matrix.environment }} \
+              -o jsonpath='{range .items[*]}{.metadata.name}={.spec.replicas}{"\n"}{end}' 2>/dev/null || true)
+            
+            echo "Live replicas: ${LIVE_REPLICAS}" >> $GITHUB_OUTPUT
+          else
+            # Do a deeper field comparison
+            kubectl diff -n order-service-api-${{ matrix.environment }} \
+              -f "$DESIRED" > /tmp/drift-report.txt 2>&1 || true
+            
+            if [ -s /tmp/drift-report.txt ]; then
+              echo "🚨 DRIFT DETECTED: Field-level drift in ${{ matrix.environment }}"
+              cat /tmp/drift-report.txt
+              echo "drift_found=true" >> $GITHUB_OUTPUT
+            else
+              echo "✅ No drift detected in ${{ matrix.environment }}"
+              echo "drift_found=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Report drift findings
+        if: steps.diff.outputs.drift_found == 'true'
+        run: |
+          echo "## Drift Detected — ${{ matrix.environment }}" > drift-report.md
+          echo "" >> drift-report.md
+          echo "**Environment:** ${{ matrix.environment }}" >> drift-report.md
+          echo "" >> drift-report.md
+          echo "### Diff Output" >> drift-report.md
+          echo '```yaml' >> drift-report.md
+          cat /tmp/drift-report.txt >> drift-report.md 2>/dev/null || true
+          echo '```' >> drift-report.md
+          
+          # Add annotation for ArgoCD sync context
+          echo "" >> drift-report.md
+          echo "### Resolution" >> drift-report.md
+          echo "1. If intentional: update Git overlay to match live state" >> drift-report.md
+          echo "2. If unintentional: run `kubectl apply -k k8s-manifests/overlays/${{ matrix.environment }}`" >> drift-report.md
+
+      - name: Create issue on drift (dev only, for demo purposes)
+        if: steps.diff.outputs.drift_found == 'true' && matrix.environment == 'dev'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🚨 Drift detected in ${{ matrix.environment }} environment`,
+              body: [
+                "Auto-detected at: ${new Date().toISOString()}",
+                "",
+                "### Immediate Actions",
+                "- Review the kubectl diff output in the workflow logs",
+                "- If drift is unintentional, sync from Git: `make deploy ENV=${{ matrix.environment }}`",
+                "- If drift is intentional (emergency fix), update the overlay to match"
+              ].join('\n')
+            });

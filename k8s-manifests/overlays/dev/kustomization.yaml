@@ -1,0 +1,52 @@
+# =============================================================================
+# Dev Overlay — Minimal replicas, smallest resources
+# Auto-deploy: every commit triggers sync via ArgoCD
+# =============================================================================
+
+namespace: order-service-api-dev
+
+resources:
+  - ../../base
+
+commonLabels:
+  environment: dev
+  team: platform-engineering
+
+patches:
+  # Patch ConfigMap with env-specific values
+  - target:
+      kind: ConfigMap
+      name: order-service-api-config
+    patch: |
+      - op: replace
+        path: /data/environment
+        value: dev
+      - op: replace
+        path: /data/imageTag
+        value: latest
+
+  # Patch deployment — 1 replica, minimal resources
+  - target:
+      kind: Deployment
+      name: order-service-api
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/cpu
+        value: 50m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/requests/memory
+        value: 64Mi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/cpu
+        value: 250m
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 128Mi
+
+images:
+  - name: PLACEHOLDER_IMAGE
+    newName: ECR_REPO/order-service-api
+    newTag: PLACEHOLDER_TAG

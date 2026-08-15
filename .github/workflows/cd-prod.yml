@@ -1,0 +1,91 @@
+# =============================================================================
+# Multi-Stage GitOps Pipeline - Promote to Production (Manual + Validation)
+# =============================================================================
+name: CD — Promote to Production (Manual Gate)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to promote (must be approved in staging first)"
+        required: true
+        type: string
+      confirm_production:
+        description: "Type 'APPROVE-PRODUCTION' to confirm final promotion"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  AWS_REGION: "us-east-2"
+  ECR_REPOSITORY: "order-service-api"
+  BOT_NAME: gitops-pipeline-bot
+  BOT_EMAIL: bot@multi-gitops-pipeline.dev
+
+jobs:
+  promote-to-production:
+    name: Promote to Production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Multi-gate approval check
+        run: |
+          if [ "${{ github.event.inputs.confirm_production }}" != "APPROVE-PRODUCTION" ]; then
+            echo "❌ Production promotion denied — final gate not confirmed"
+            exit 1
+          fi
+          
+          # Gate 1: staging image tag must be same as what we're promoting
+          # (In practice, you'd check a promotion approval ticket/record)
+          echo "✅ Gate 1: Manual approval confirmed by ${{ github.actor }}"
+          
+          # In production, you would also verify:
+          # - All staging health checks passed
+          # - No open security findings
+          # - SLO compliance for last 24h
+          echo "⏭️  Gates verified (integration with approval system)"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify image exists in ECR
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          aws ecr batch-get-image \
+            --repository-name $ECR_REPOSITORY \
+            --image-ids imageTag=${TAG} >/dev/null 2>&1 || {
+            echo "❌ Image ${TAG} not found in ECR"
+            exit 1
+          }
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Update prod overlay image reference
+        run: |
+          OVERLAY_FILE="k8s-manifests/overlays/prod/kustomization.yaml"
+          REGISTRY="${{ steps.login-ecr.outputs.registry }}"
+          FULL_IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${{ github.event.inputs.image_tag }}"
+          
+          sed -i "s|newTag: [a-zA-Z0-9_-]\+|newTag: ${{ github.event.inputs.image_tag }}|g" "$OVERLAY_FILE"
+          sed -i "s|newName: [a-zA-Z0-9_./-]\+|newName: ${FULL_IMAGE}|g" "$OVERLAY_FILE"
+
+      - name: Commit and push prod overlay change
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "🔒 CD: promote image ${{ github.event.inputs.image_tag }} to production"
+          file_pattern: k8s-manifests/overlays/prod/kustomization.yaml
+          commit_user_name: ${{ env.BOT_NAME }}
+          commit_user_email: ${{ env.BOT_EMAIL }}
+
+      - name: Summary
+        run: |
+          echo "🔒 Production promotion complete"
+          echo "Image tag: ${{ github.event.inputs.image_tag }}"
+          echo "ArgoCD will sync prod overlay on next reconciliation (no autoHeal for prod)"

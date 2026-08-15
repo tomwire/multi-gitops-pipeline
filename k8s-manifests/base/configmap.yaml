@@ -1,0 +1,11 @@
+# =============================================================================
+# Base — ConfigMap for environment variables
+# =============================================================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-service-api-config
+data:
+  environment: "default"
+  imageTag: "latest"

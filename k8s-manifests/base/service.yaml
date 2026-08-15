@@ -1,0 +1,17 @@
+# =============================================================================
+# Base — Order Service API Service
+# =============================================================================
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service-api
+spec:
+  selector:
+    app: order-service-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP
