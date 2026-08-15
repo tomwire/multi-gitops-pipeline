@@ -15,7 +15,7 @@ permissions:
 
 env:
   AWS_REGION: "us-east-2"
-  ECR_REPOSITORY: "order-service-api"
+  ECR_REPOSITORY: order-service-api
   BOT_NAME: gitops-pipeline-bot
   BOT_EMAIL: bot@multi-gitops-pipeline.dev
 
@@ -30,46 +30,50 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Only promote when CI actually pushed to ECR (credentials were configured)
+      - name: Skip promotion without AWS credentials
+        id: check-creds
+        run: |
+          if [[ "${{ secrets.AWS_ROLE_ARN }}" == "" ]]; then
+            echo "Skipping dev promotion — no AWS_ROLE_ARN secret configured."
+            echo "set=false" >> $GITHUB_OUTPUT
+          else
+            echo "AWS credentials available, proceeding with promotion."
+            echo "set=true" >> $GITHUB_OUTPUT
+          fi
+
       - name: Configure AWS credentials
+        if: steps.check-creds.outputs.set == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
+        if: steps.check-creds.outputs.set == 'true'
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Get latest image digest
-        run: |
-          LATEST_DIGEST=$(aws ecr batch-get-image \
-            --repository-name $ECR_REPOSITORY \
-            --image-ids imageTag=latest \
-            --query 'images[0].imageId.imageDigest' \
-            --output text)
-          echo "Latest image digest: ${LATEST_DIGEST}"
-          echo "IMAGE_DIGEST=${LATEST_DIGEST}" >> $GITHUB_ENV
-
       - name: Determine new tag
+        if: steps.check-creds.outputs.set == 'true'
         run: |
-          # Use the SHA from workflow_run event or fallback to latest git commit
           COMMIT_SHA="${{ github.event.workflow_run.head_sha }}"
           echo "PROMOTE_TAG=v$(date +%Y%m%d)-${COMMIT_SHA:0:8}" >> $GITHUB_ENV
-          echo "Using tag: ${PROMOTE_TAG}"
 
       - name: Update dev overlay image reference
+        if: steps.check-creds.outputs.set == 'true'
         run: |
           OVERLAY_FILE="k8s-manifests/overlays/dev/kustomization.yaml"
           REGISTRY="${{ steps.login-ecr.outputs.registry }}"
           FULL_IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${PROMOTE_TAG}"
-          
-          # Use sed with \b anchors to match only the exact placeholder strings
-          sed -i "s|newTag: [a-zA-Z0-9_-]\+|newTag: ${PROMOTE_TAG}|g" "$OVERLAY_FILE"
-          sed -i "s|newName: [a-zA-Z0-9_./-]\+|newName: ${FULL_IMAGE}|g" "$OVERLAY_FILE"
-          
+
+          sed -i "s|newTag: [a-zA-Z0-9_.-]*|newTag: ${PROMOTE_TAG}|g" "$OVERLAY_FILE"
+          sed -i "s|newName: [a-zA-Z0-9_./:-]*|newName: ${FULL_IMAGE}|g" "$OVERLAY_FILE"
+
           echo "Updated dev overlay to: ${FULL_IMAGE}"
 
       - name: Commit and push dev overlay change
+        if: steps.check-creds.outputs.set == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "🚀 CD: promote image ${{ env.PROMOTE_TAG }} to dev"
@@ -79,4 +83,5 @@ jobs:
           commit_author: ${{ env.BOT_NAME }} <${{ env.BOT_EMAIL }}>
 
       - name: Notify ArgoCD (dev should auto-sync)
+        if: steps.check-creds.outputs.set == 'true'
         run: echo "✅ Dev overlay updated — ArgoCD will auto-sync via selfHeal"

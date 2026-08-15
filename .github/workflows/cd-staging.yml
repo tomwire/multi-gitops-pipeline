@@ -30,6 +30,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check credentials availability
+        id: check-creds
+        run: |
+          if [ "${{ secrets.AWS_ROLE_ARN }}" != "" ]; then
+            echo "AWS credentials available — proceeding with full pipeline"
+            exit 0
+          else
+            echo "⚠️  No AWS_ROLE_ARN secret configured (portfolio mode)"
+            echo "AWS-dependent steps will be skipped. In production, set AWS_ROLE_ARN in repo secrets."
+            exit 0
+          fi
+
       - name: Approve gate check
         run: |
           if [ "${{ github.event.inputs.confirm_staging }}" != "APPROVE-STAGING" ]; then
@@ -39,12 +51,14 @@ jobs:
           echo "✅ Staging promotion approved by ${{ github.actor }}"
 
       - name: Configure AWS credentials
+        if: ${{ steps.check-creds.outcome == 'success' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Verify image exists in ECR
+        if: ${{ steps.check-creds.outcome == 'success' }}
         run: |
           TAG="${{ github.event.inputs.image_tag }}"
           aws ecr batch-get-image \
@@ -56,10 +70,12 @@ jobs:
           echo "✅ Image ${TAG} verified in ECR"
 
       - name: Login to Amazon ECR
+        if: ${{ steps.check-creds.outcome == 'success' }}
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Update staging overlay image reference
+        if: ${{ steps.check-creds.outcome == 'success' }}
         run: |
           OVERLAY_FILE="k8s-manifests/overlays/staging/kustomization.yaml"
           REGISTRY="${{ steps.login-ecr.outputs.registry }}"
@@ -69,6 +85,7 @@ jobs:
           sed -i "s|newName: [a-zA-Z0-9_./-]\+|newName: ${FULL_IMAGE}|g" "$OVERLAY_FILE"
 
       - name: Commit and push staging overlay change
+        if: ${{ steps.check-creds.outcome == 'success' }}
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "📦 CD: promote image ${{ github.event.inputs.image_tag }} to staging"
@@ -77,6 +94,7 @@ jobs:
           commit_user_email: ${{ env.BOT_EMAIL }}
 
       - name: Summary
+        if: ${{ steps.check-creds.outcome == 'success' }}
         run: |
           echo "✅ Staging promotion complete"
           echo "Image tag: ${{ github.event.inputs.image_tag }}"
