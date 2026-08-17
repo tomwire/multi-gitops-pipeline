@@ -31,11 +31,11 @@ jobs:
         run: |
           if [ "${{ secrets.AWS_ROLE_ARN }}" != "" ]; then
             echo "AWS credentials available — proceeding with full drift detection"
-            exit 0
+            echo "aws_available=true" >> $GITHUB_OUTPUT
           else
             echo "⚠️  No AWS_ROLE_ARN secret configured (portfolio mode)"
             echo "Drift detection requires access to EKS clusters. Set AWS_ROLE_ARN in repo secrets for production use."
-            exit 0
+            echo "aws_available=false" >> $GITHUB_OUTPUT
           fi
 
       - name: Setup kubectl
@@ -44,14 +44,14 @@ jobs:
           version: 'latest'
 
       - name: Configure AWS credentials
-        if: ${{ steps.check-creds.outcome == 'success' }}
+        if: steps.check-creds.outputs.aws_available == 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Update kubeconfig for EKS
-        if: ${{ steps.check-creds.outcome == 'success' }}
+        if: steps.check-creds.outputs.aws_available == 'true'
         run: |
           CLUSTER_NAME="eks-${{ matrix.environment }}"
           aws eks update-kubeconfig --name $CLUSTER_NAME \
@@ -75,7 +75,7 @@ jobs:
           fi
 
       - name: Get live cluster state
-        if: ${{ steps.check-creds.outcome == 'success' }}
+        if: steps.check-creds.outputs.aws_available == 'true'
         run: |
           KUBECTL_NAMESPACE="order-service-api-${{ matrix.environment }}"
           kubectl get deployments,service,statefulset,pod -n $KUBECTL_NAMESPACE \
@@ -85,7 +85,7 @@ jobs:
           }
 
       - name: Compare desired vs live (drift detection)
-        if: ${{ steps.check-creds.outcome == 'success' }}
+        if: steps.check-creds.outputs.aws_available == 'true'
         id: diff
         run: |
           DESIRED="/tmp/desired-${{ matrix.environment }}.yaml"
@@ -132,7 +132,7 @@ jobs:
           fi
 
       - name: Report drift findings
-        if: steps.check-creds.outcome == 'success' && steps.diff.outputs.drift_found == 'true'
+        if: steps.check-creds.outputs.aws_available == 'true' && steps.diff.outputs.drift_found == 'true'
         run: |
           echo "## Drift Detected — ${{ matrix.environment }}" > drift-report.md
           echo "" >> drift-report.md
@@ -150,7 +150,7 @@ jobs:
           echo "2. If unintentional: run `kubectl apply -k k8s-manifests/overlays/${{ matrix.environment }}`" >> drift-report.md
 
       - name: Create issue on drift (dev only, for demo purposes)
-        if: steps.check-creds.outcome == 'success' && steps.diff.outputs.drift_found == 'true' && matrix.environment == 'dev'
+        if: steps.check-creds.outputs.aws_available == 'true' && steps.diff.outputs.drift_found == 'true' && matrix.environment == 'dev'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
